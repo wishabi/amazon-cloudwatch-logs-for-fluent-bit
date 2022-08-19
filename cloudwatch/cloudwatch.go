@@ -610,13 +610,16 @@ func (output *OutputPlugin) createStream(e *Event) (*logStream, error) {
 }
 
 func (output *OutputPlugin) createLogGroup(e *Event) error {
+	logrus.Infof("creating log group, with tag string %s", e.tag)
+	tagMap := tagKeysToMap(e.tag)
+	logrus.Infof("tag map is %v", tagMap)
 	if !output.autoCreateGroup {
 		return nil
 	}
 
 	_, err := output.client.CreateLogGroup(&cloudwatchlogs.CreateLogGroupInput{
 		LogGroupName: aws.String(e.group),
-		Tags:         tagKeysToMap(e.tag),
+		Tags:         tagMap,
 		// Tags:         output.logGroupTags,
 	})
 	if err == nil {
@@ -810,7 +813,9 @@ func (output *OutputPlugin) putLogEvents(stream *logStream) error {
 				// a log group or a log stream should be re-created after it is deleted and then retry
 				logrus.Errorf("[cloudwatch %d] Encountered error %v; detailed information: %s\n", output.PluginInstanceID, awsErr, awsErr.Message())
 				if strings.Contains(awsErr.Message(), "group") {
-					if err := output.createLogGroup(&Event{group: stream.logGroupName}); err != nil {
+					// HACK to add system tag for deleted log groups
+					system := strings.TrimPrefix(stream.logGroupName, "/aws/eks/services-eks-stg/")
+					if err := output.createLogGroup(&Event{group: stream.logGroupName, tag: fmt.Sprintf("system=%s", system)}); err != nil {
 						logrus.Errorf("[cloudwatch %d] Encountered error %v\n", output.PluginInstanceID, err)
 						return err
 					}
