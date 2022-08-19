@@ -573,7 +573,9 @@ func (output *OutputPlugin) setGroupStreamNames(e *Event) {
 	} else if e.tag = s.buf.String(); len(e.tag) == 0 {
 		e.tag = ""
 	}
-	// logrus.Infof("========== Post Processing e.tag %s\n", e.tag)
+	if !strings.Contains(e.tag, "fluent") {
+		logrus.Infof("========== Post Processing e.tag %s\n", e.tag)
+	}
 
 	output.bufferPool.Put(s.buf)
 }
