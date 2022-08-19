@@ -618,6 +618,8 @@ func (output *OutputPlugin) createLogGroup(e *Event) error {
 		// Tags:         output.logGroupTags,
 	})
 	if err == nil {
+		logrus.Infof("[cloudwatch %d] log group tags %s\n", output.PluginInstanceID, e.tag)
+		logrus.Infof("[cloudwatch %d] log group tag map %s\n", output.PluginInstanceID, tagKeysToMap(e.tag))
 		logrus.Infof("[cloudwatch %d] Created log group %s\n", output.PluginInstanceID, e.group)
 		return output.setLogGroupRetention(e.group)
 	}
