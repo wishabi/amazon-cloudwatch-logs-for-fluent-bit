@@ -88,6 +88,7 @@ type Event struct {
 	Tag    string
 	group  string
 	stream string
+	tag    string
 }
 
 // TaskMetadata it the task metadata from ECS V3 endpoint
@@ -132,15 +133,16 @@ type OutputPlugin struct {
 	timer                         *plugins.Timeout
 	nextLogStreamCleanUpCheckTime time.Time
 	PluginInstanceID              int
-	logGroupTags                  map[string]*string
-	logGroupRetention             int64
-	autoCreateGroup               bool
-	autoCreateStream              bool
-	bufferPool                    bytebufferpool.Pool
-	ecsMetadata                   TaskMetadata
-	runningInECS                  bool
-	uuid                          string
-	extraUserAgent                string
+	// logGroupTags                  map[string]*string
+	logGroupTags      *fastTemplate
+	logGroupRetention int64
+	autoCreateGroup   bool
+	autoCreateStream  bool
+	bufferPool        bytebufferpool.Pool
+	ecsMetadata       TaskMetadata
+	runningInECS      bool
+	uuid              string
+	extraUserAgent    string
 }
 
 // OutputPluginConfig is the input information used by NewOutputPlugin to create a new OutputPlugin
@@ -213,6 +215,11 @@ func NewOutputPlugin(config OutputPluginConfig) (*OutputPlugin, error) {
 		return nil, err
 	}
 
+	logGroupTagsTemplate, err := newTemplate(config.NewLogGroupTags)
+	if err != nil {
+		return nil, err
+	}
+
 	runningInECS := true
 	// check if it is running in ECS
 	if os.Getenv("ECS_CONTAINER_METADATA_URI") == "" {
@@ -231,15 +238,16 @@ func NewOutputPlugin(config OutputPluginConfig) (*OutputPlugin, error) {
 		streams:                       make(map[string]*logStream),
 		nextLogStreamCleanUpCheckTime: time.Now().Add(logStreamInactivityCheckInterval),
 		PluginInstanceID:              config.PluginInstanceID,
-		logGroupTags:                  tagKeysToMap(config.NewLogGroupTags),
-		logGroupRetention:             config.LogRetentionDays,
-		autoCreateGroup:               config.AutoCreateGroup,
-		autoCreateStream:              config.AutoCreateStream,
-		groups:                        make(map[string]struct{}),
-		ecsMetadata:                   TaskMetadata{},
-		runningInECS:                  runningInECS,
-		uuid:                          ksuid.New().String(),
-		extraUserAgent:                config.ExtraUserAgent,
+		// logGroupTags:                  tagKeysToMap(config.NewLogGroupTags),
+		logGroupTags:      logGroupTagsTemplate,
+		logGroupRetention: config.LogRetentionDays,
+		autoCreateGroup:   config.AutoCreateGroup,
+		autoCreateStream:  config.AutoCreateStream,
+		groups:            make(map[string]struct{}),
+		ecsMetadata:       TaskMetadata{},
+		runningInECS:      runningInECS,
+		uuid:              ksuid.New().String(),
+		extraUserAgent:    config.ExtraUserAgent,
 	}, nil
 }
 
@@ -555,6 +563,21 @@ func (output *OutputPlugin) setGroupStreamNames(e *Event) {
 	}
 
 	output.bufferPool.Put(s.buf)
+	s.buf.Reset()
+
+	// logrus.Infof("========== Before Processing output.logGroupTags %s\n", output.logGroupTags.String)
+	if _, err := parseDataMapTags(e, logTagSplit, output.logGroupTags, output.ecsMetadata, output.uuid, s); err != nil {
+		e.tag = ""
+		logrus.Errorf("[cloudwatch %d] parsing log_group_tags template '%s': %v",
+			output.PluginInstanceID, output.logGroupTags.String, err)
+	} else if e.tag = s.buf.String(); len(e.tag) == 0 {
+		e.tag = ""
+	}
+	if !strings.Contains(e.tag, "fluent") {
+		logrus.Infof("========== Post Processing e.tag %s\n", e.tag)
+	}
+
+	output.bufferPool.Put(s.buf)
 }
 
 func (output *OutputPlugin) createStream(e *Event) (*logStream, error) {
@@ -587,15 +610,21 @@ func (output *OutputPlugin) createStream(e *Event) (*logStream, error) {
 }
 
 func (output *OutputPlugin) createLogGroup(e *Event) error {
+	logrus.Infof("creating log group, with tag string %s", e.tag)
+	tagMap := tagKeysToMap(e.tag)
+	logrus.Infof("tag map is %v", tagMap)
 	if !output.autoCreateGroup {
 		return nil
 	}
 
 	_, err := output.client.CreateLogGroup(&cloudwatchlogs.CreateLogGroupInput{
 		LogGroupName: aws.String(e.group),
-		Tags:         output.logGroupTags,
+		Tags:         tagMap,
+		// Tags:         output.logGroupTags,
 	})
 	if err == nil {
+		logrus.Infof("[cloudwatch %d] log group tags %s\n", output.PluginInstanceID, e.tag)
+		logrus.Infof("[cloudwatch %d] log group tag map %s\n", output.PluginInstanceID, tagKeysToMap(e.tag))
 		logrus.Infof("[cloudwatch %d] Created log group %s\n", output.PluginInstanceID, e.group)
 		return output.setLogGroupRetention(e.group)
 	}
@@ -784,7 +813,9 @@ func (output *OutputPlugin) putLogEvents(stream *logStream) error {
 				// a log group or a log stream should be re-created after it is deleted and then retry
 				logrus.Errorf("[cloudwatch %d] Encountered error %v; detailed information: %s\n", output.PluginInstanceID, awsErr, awsErr.Message())
 				if strings.Contains(awsErr.Message(), "group") {
-					if err := output.createLogGroup(&Event{group: stream.logGroupName}); err != nil {
+					// HACK to add system tag for deleted log groups
+					system := strings.TrimPrefix(stream.logGroupName, "/aws/eks/services-eks-stg/")
+					if err := output.createLogGroup(&Event{group: stream.logGroupName, tag: fmt.Sprintf("system=%s", system)}); err != nil {
 						logrus.Errorf("[cloudwatch %d] Encountered error %v\n", output.PluginInstanceID, err)
 						return err
 					}
